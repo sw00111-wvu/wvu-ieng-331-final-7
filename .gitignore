@@ -205,3 +205,613 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# WVU IENG 331 Honors Final — Team 7
+
+Interactive forecasting application built with **Marimo**, **Polars**, **Altair**, and **statsforecast**.
+
+## Live Deployment
+
+- **Public URL:** `https://huggingface.co/spaces/REPLACE_WITH_TEAM7_URL`
+
+> Replace the URL above with your actual deployed app URL before submission.
+
+## What the App Does
+
+This app lets a non-technical user explore Olist historical marketplace behavior and generate forecasts with confidence intervals.
+
+Users can:
+- Select a metric to forecast (`monthly_revenue`, `order_volume`, `delivery_days`)
+- Choose a forecasting model (`AutoARIMA`, `SeasonalNaive`, `AutoETS`)
+- Adjust forecast horizon (3–24 months)
+- Filter by product category and seller state
+- View historical actuals overlaid with forecasted values and uncertainty bands
+
+## Local Run Instructions
+
+```bash
+uv sync
+uv run marimo run app.py
+```
+
+Then open the local URL printed by Marimo.
+
+## Repository Layout
+
+- `app.py` — interactive Marimo application
+- `src/forecast.py` — data loading, preprocessing, and statsforecast integration
+- `docs/technical_writeup.md` — 1–2 page design and implementation writeup
+- `data/cache/` — local CSV cache used at runtime
+
+## Known Limitations
+
+- First run may be slower while public Olist CSV files are downloaded and cached.
+- Forecasts are univariate (no external regressors).
+- Very narrow filters may produce too little data for forecasting; the UI displays a warning in that case.
+- Deployment URL placeholder must be replaced with your team’s live URL.
+# app.py
+app.py
+New
++164
+-0
+
+import altair as alt
+import marimo
+import polars as pl
+
+from src.forecast import available_filters, run_forecast
+
+app = marimo.App(width="full")
+
+
+@app.cell
+def _():
+    marimo.md(
+        """
+        # Olist Interactive Forecasting App
+        Explore historical Olist marketplace performance and compare forward-looking forecasts.
+        """
+    )
+    return
+
+
+@app.cell
+def _():
+    metric_options = {
+        "Monthly Revenue (BRL)": "monthly_revenue",
+        "Order Volume": "order_volume",
+        "Average Delivery Days": "delivery_days",
+    }
+    model_options = ["AutoARIMA", "SeasonalNaive", "AutoETS"]
+    categories, states = available_filters()
+
+    metric = marimo.ui.dropdown(options=metric_options, value="monthly_revenue", label="Metric")
+    model = marimo.ui.dropdown(options=model_options, value="AutoARIMA", label="Forecast Model")
+    horizon = marimo.ui.slider(start=3, stop=24, step=1, value=6, label="Forecast Horizon (months)")
+    category = marimo.ui.dropdown(options=categories, value="All", label="Product Category Filter")
+    state = marimo.ui.dropdown(options=states, value="All", label="Seller State Filter")
+
+    marimo.hstack([metric, model, horizon, category, state], widths=[1, 1, 1, 2, 1])
+    return metric, model, horizon, category, state
+
+
+@app.cell
+def _(category, horizon, metric, model, state):
+    result = run_forecast(
+        metric=metric.value,
+        model_name=model.value,
+        horizon=horizon.value,
+        category=category.value,
+        seller_state=state.value,
+    )
+    return result
+
+
+@app.cell
+def _(marimo, result):
+    if not result.ok:
+        marimo.callout(
+            kind="warn",
+            value=f"Cannot generate forecast: {result.message}",
+        )
+    return
+
+
+@app.cell
+def _(alt, pl, result):
+    if not result.ok:
+        return
+
+    history = result.history.rename({"y": "actual"})
+    forecast = result.forecast
+
+    history_pd = history.to_pandas()
+    forecast_pd = forecast.to_pandas()
+
+    base = alt.Chart(history_pd).encode(x=alt.X("ds:T", title="Month"))
+    actual_line = base.mark_line(color="#1f77b4", strokeWidth=2).encode(
+        y=alt.Y("actual:Q", title="Metric Value"),
+        tooltip=["ds:T", alt.Tooltip("actual:Q", format=",.2f")],
+    )
+
+    forecast_line = (
+        alt.Chart(forecast_pd)
+        .mark_line(color="#d62728", strokeDash=[6, 4], strokeWidth=2)
+        .encode(
+            x="ds:T",
+            y="yhat:Q",
+            tooltip=["ds:T", alt.Tooltip("yhat:Q", format=",.2f")],
+        )
+    )
+
+    ci_band = (
+        alt.Chart(forecast_pd)
+        .mark_area(color="#ff9896", opacity=0.25)
+        .encode(x="ds:T", y="lo95:Q", y2="hi95:Q")
+    )
+
+    forecast_vs_actual = (ci_band + actual_line + forecast_line).properties(
+        title="Historical Actuals vs Forecast with 95% Confidence Interval",
+        height=350,
+    )
+
+    return forecast_vs_actual, history, history_pd
+
+
+@app.cell
+def _(alt, history_pd, result):
+    if not result.ok:
+        return
+
+    recent = history_pd.sort_values("ds").tail(12)
+    recent_chart = (
+        alt.Chart(recent)
+        .mark_bar(color="#2ca02c")
+        .encode(
+            x=alt.X("ds:T", title="Recent Months"),
+            y=alt.Y("actual:Q", title="Observed Value"),
+            tooltip=["ds:T", alt.Tooltip("actual:Q", format=",.2f")],
+        )
+        .properties(title="Last 12 Months of Actual Observations", height=220)
+    )
+    return recent_chart
+
+
+@app.cell
+def _(alt, pl, result):
+    if not result.ok:
+        return
+
+    history = result.history.rename({"y": "actual"})
+    with_trend = history.with_columns(
+        pl.col("actual").pct_change().mul(100).alias("pct_change")
+    ).drop_nulls("pct_change")
+
+    trend_chart = (
+        alt.Chart(with_trend.to_pandas())
+        .mark_line(point=True, color="#9467bd")
+        .encode(
+            x=alt.X("ds:T", title="Month"),
+            y=alt.Y("pct_change:Q", title="Month-over-Month Change (%)"),
+            tooltip=["ds:T", alt.Tooltip("pct_change:Q", format=".2f")],
+        )
+        .properties(title="Month-over-Month Percent Change", height=220)
+    )
+    return trend_chart
+
+
+@app.cell
+def _(forecast_vs_actual, marimo, recent_chart, result, trend_chart):
+    if not result.ok:
+        return
+
+    marimo.vstack(
+        [
+            marimo.md("### Forecast Output"),
+            marimo.ui.altair_chart(forecast_vs_actual),
+            marimo.hstack(
+                [marimo.ui.altair_chart(recent_chart), marimo.ui.altair_chart(trend_chart)]
+            ),
+        ]
+    )
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+# docs/technical_writeup.md
+docs/technical_writeup.md
+New
++104
+-0
+
+# Technical Writeup: Interactive Olist Forecasting Application
+
+## 1) statsforecast Integration
+
+The forecasting backend lives in `src/forecast.py` and is designed around `statsforecast` as a black-box forecasting engine.
+
+### Models selected
+I implemented three models so users can compare behavior:
+
+- **AutoARIMA**: Good default for many non-stationary business series.
+- **SeasonalNaive**: Strong baseline for seasonal monthly data.
+- **AutoETS**: Captures trend/seasonality with exponential smoothing components.
+
+Users choose among these in the UI. Internally, model factories instantiate the selected model and run:
+
+- Monthly frequency (`freq="MS"`)
+- Configurable forecast horizon (`h` from the slider)
+- Prediction intervals at 80% and 95% levels (`level=[80, 95]`)
+
+The backend returns a Polars DataFrame with:
+
+- `ds` (future timestamp)
+- `yhat` (point forecast)
+- `lo80`, `hi80`, `lo95`, `hi95` (prediction intervals)
+
+### Metrics included
+The app supports at least two metrics (actually three):
+
+1. `monthly_revenue` (sum of item `price + freight_value`)
+2. `order_volume` (unique orders per month)
+3. `delivery_days` (average days from purchase to delivered date)
+
+All are aggregated at a monthly grain to align with the models’ seasonality configuration.
+
+### Edge-case handling
+The module handles several failure modes without throwing tracebacks:
+
+- Empty data after filters → returns a user-facing message
+- Unknown model name → returns validation error message
+- Too-short time series (default < 18 observations) → returns “insufficient data” message
+- Null-heavy delivery times after aggregation → filtered before model fitting
+
+## 2) UX Design Decisions
+
+The target user is non-technical, so controls focus on practical decisions they can understand.
+
+### Controls and why they exist
+1. **Metric selection**: lets business users choose *what* outcome to forecast.
+2. **Model selection**: enables quick side-by-side conceptual comparison of methods.
+3. **Forecast horizon**: controls planning window (short-term operations vs longer planning).
+4. **Product category filter**: supports category-level demand/revenue planning.
+5. **Seller state filter**: allows regional drill-down.
+
+### Sensible defaults
+On first load, controls default to:
+
+- Metric: Monthly revenue
+- Model: AutoARIMA
+- Horizon: 6 months
+- Filters: All categories / All states
+
+These defaults yield immediate output for a first-time user without extra setup.
+
+## 3) Marimo Reactivity Graph
+
+Marimo cells are structured so each UI control feeds one forecast function call.
+
+1. Controls emit values.
+2. A forecast cell calls `run_forecast(...)` with the current selections.
+3. A status cell shows warning callouts for invalid cases.
+4. Visualization cells depend on forecast output and render only when `result.ok` is true.
+
+This creates a predictable reactive graph: changing any control recomputes the forecast and automatically refreshes all dependent charts.
+
+## 4) Visualization Choices
+
+The app includes three reactive Altair charts:
+
+1. **Historical vs Forecast Overlay**
+   - Actual line + forecast line + shaded 95% confidence interval.
+2. **Recent Actuals (Last 12 Months)**
+   - Bar chart for immediate recent context.
+3. **Month-over-Month % Change**
+   - Trend chart to communicate volatility and directional momentum.
+
+Together they show level, recent behavior, and momentum.
+
+## 5) Known Limitations
+
+- Data is sourced from CSVs and processed on demand; very large workloads may feel slower.
+- Forecasts are univariate; no exogenous variables (promotions, holidays, macro conditions).
+- A single global `min_points` threshold is used for all metrics.
+- Confidence intervals come from model assumptions and may be optimistic in volatile segments.
+
+## 6) Scaling Plan (10x data / daily refresh)
+
+If data volume increased 10x or refreshed daily, I would adapt as follows:
+
+1. **Pre-aggregation pipeline**: materialize monthly metric tables upstream rather than joining raw tables at runtime.
+2. **Incremental updates**: process only new partitions (daily append) into an analytical store.
+3. **Caching layer**: cache common filter/model/horizon outputs.
+4. **Async job queue**: run heavier forecasts in background workers.
+5. **Monitoring**: track latency and forecast failures per segment/model.
+6. **Model governance**: benchmark model performance over time and auto-select best model per segment.
+# pyproject.toml
+pyproject.toml
+New
++17
+-0
+
+[project]
+name = "olist-forecasting-app"
+version = "0.1.0"
+description = "Interactive Marimo forecasting app for Olist marketplace metrics"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "altair>=5.2.0",
+  "marimo>=0.10.8",
+  "numpy>=1.26.0",
+  "polars>=1.8.0",
+  "pyarrow>=16.0.0",
+  "statsforecast>=1.7.0",
+]
+
+[tool.uv]
+package = false
+# src/forecast.py
+src/forecast.py
+New
++224
+-0
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+import polars as pl
+from statsforecast import StatsForecast
+from statsforecast.models import AutoARIMA, AutoETS, SeasonalNaive
+
+MetricName = Literal["monthly_revenue", "order_volume", "delivery_days"]
+
+DATASETS = {
+    "orders": "https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets/olist_orders_dataset.csv",
+    "order_items": "https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets/olist_order_items_dataset.csv",
+    "products": "https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets/olist_products_dataset.csv",
+    "translation": "https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets/product_category_name_translation.csv",
+    "sellers": "https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets/olist_sellers_dataset.csv",
+}
+
+MODEL_FACTORIES = {
+    "AutoARIMA": lambda: AutoARIMA(season_length=12),
+    "SeasonalNaive": lambda: SeasonalNaive(season_length=12),
+    "AutoETS": lambda: AutoETS(season_length=12),
+}
+
+
+@dataclass
+class ForecastResult:
+    ok: bool
+    message: str
+    history: pl.DataFrame
+    forecast: pl.DataFrame
+
+
+def _load_csv(cache_dir: Path, name: str, url: str) -> pl.DataFrame:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{name}.csv"
+    if not cache_path.exists():
+        df = pl.read_csv(url)
+        df.write_csv(cache_path)
+    return pl.read_csv(cache_path)
+
+
+def load_olist_frames(cache_dir: str | Path = "data/cache") -> dict[str, pl.DataFrame]:
+    """Load the Olist tables needed for this app with local caching."""
+    cache_path = Path(cache_dir)
+    return {
+        name: _load_csv(cache_path, name, url)
+        for name, url in DATASETS.items()
+    }
+
+
+def build_monthly_series(
+    metric: MetricName,
+    category: str = "All",
+    seller_state: str = "All",
+    cache_dir: str | Path = "data/cache",
+) -> tuple[pl.DataFrame, str]:
+    """Build a monthly series for the selected metric and filters."""
+    tables = load_olist_frames(cache_dir=cache_dir)
+
+    orders = tables["orders"].with_columns(
+        pl.col("order_purchase_timestamp").str.to_datetime(strict=False),
+        pl.col("order_delivered_customer_date").str.to_datetime(strict=False),
+    )
+
+    order_items = tables["order_items"]
+    products = tables["products"]
+    translation = tables["translation"]
+    sellers = tables["sellers"]
+
+    product_lookup = products.join(
+        translation,
+        on="product_category_name",
+        how="left",
+    ).with_columns(
+        pl.col("product_category_name_english").fill_null("unknown")
+    )
+
+    base = (
+        order_items.join(
+            orders.select(
+                [
+                    "order_id",
+                    "order_purchase_timestamp",
+                    "order_delivered_customer_date",
+                    "order_status",
+                ]
+            ),
+            on="order_id",
+            how="inner",
+        )
+        .join(
+            product_lookup.select(["product_id", "product_category_name_english"]),
+            on="product_id",
+            how="left",
+        )
+        .join(sellers.select(["seller_id", "seller_state"]), on="seller_id", how="left")
+        .filter(pl.col("order_status").is_in(["delivered", "shipped", "invoiced"]))
+    )
+
+    if category != "All":
+        base = base.filter(pl.col("product_category_name_english") == category)
+
+    if seller_state != "All":
+        base = base.filter(pl.col("seller_state") == seller_state)
+
+    if base.is_empty():
+        return pl.DataFrame({"ds": [], "y": []}), "No data available for selected filters."
+
+    with_month = base.with_columns(
+        pl.col("order_purchase_timestamp").dt.truncate("1mo").alias("ds"),
+        (pl.col("order_delivered_customer_date") - pl.col("order_purchase_timestamp"))
+        .dt.total_days()
+        .alias("delivery_days"),
+    )
+
+    if metric == "monthly_revenue":
+        monthly = with_month.group_by("ds").agg(
+            (pl.col("price") + pl.col("freight_value")).sum().alias("y")
+        )
+    elif metric == "order_volume":
+        monthly = with_month.group_by("ds").agg(pl.col("order_id").n_unique().alias("y"))
+    else:
+        monthly = with_month.group_by("ds").agg(
+            pl.col("delivery_days").drop_nulls().mean().alias("y")
+        )
+
+    monthly = (
+        monthly.sort("ds")
+        .filter(pl.col("y").is_not_null())
+        .with_columns(pl.col("y").cast(pl.Float64))
+    )
+
+    if monthly.is_empty():
+        return monthly, "No valid data points found after aggregation."
+
+    return monthly, ""
+
+
+def run_forecast(
+    metric: MetricName,
+    model_name: str,
+    horizon: int,
+    category: str = "All",
+    seller_state: str = "All",
+    min_points: int = 18,
+    cache_dir: str | Path = "data/cache",
+) -> ForecastResult:
+    """Forecast the selected metric with statsforecast and return history + projection."""
+    series, msg = build_monthly_series(
+        metric=metric,
+        category=category,
+        seller_state=seller_state,
+        cache_dir=cache_dir,
+    )
+
+    if series.is_empty():
+        return ForecastResult(False, msg, series, pl.DataFrame())
+
+    n = series.height
+    if n < min_points:
+        return ForecastResult(
+            False,
+            f"Need at least {min_points} monthly observations for forecasting. Found {n}.",
+            series,
+            pl.DataFrame(),
+        )
+
+    if model_name not in MODEL_FACTORIES:
+        return ForecastResult(
+            False,
+            f"Unknown model '{model_name}'. Choose one of: {', '.join(MODEL_FACTORIES)}.",
+            series,
+            pl.DataFrame(),
+        )
+
+    sf_input = series.select(
+        pl.lit("selected_series").alias("unique_id"),
+        pl.col("ds"),
+        pl.col("y"),
+    )
+
+    model = MODEL_FACTORIES[model_name]()
+    forecaster = StatsForecast(models=[model], freq="MS", n_jobs=1)
+    fcst = forecaster.forecast(df=sf_input.to_pandas(), h=horizon, level=[80, 95])
+
+    forecast_df = (
+        pl.from_pandas(fcst)
+        .rename(
+            {
+                model_name: "yhat",
+                f"{model_name}-lo-80": "lo80",
+                f"{model_name}-hi-80": "hi80",
+                f"{model_name}-lo-95": "lo95",
+                f"{model_name}-hi-95": "hi95",
+            }
+        )
+        .select(["ds", "yhat", "lo80", "hi80", "lo95", "hi95"])
+        .with_columns(pl.col("ds").cast(pl.Datetime))
+    )
+
+    return ForecastResult(True, "", series, forecast_df)
+
+
+def available_filters(cache_dir: str | Path = "data/cache") -> tuple[list[str], list[str]]:
+    """Return sorted category and seller-state options for UI controls."""
+    tables = load_olist_frames(cache_dir=cache_dir)
+    products = tables["products"]
+    translation = tables["translation"]
+    sellers = tables["sellers"]
+
+    categories = (
+        products.join(translation, on="product_category_name", how="left")
+        .select(pl.col("product_category_name_english").fill_null("unknown"))
+        .unique()
+        .sort("product_category_name_english")
+        .to_series()
+        .to_list()
+    )
+    states = sellers.select("seller_state").drop_nulls().unique().sort("seller_state").to_series().to_list()
+
+    return ["All", *categories], ["All", *states]
+@app.cell
+def _(marimo, result):
+    if not result.ok:
+        return
+
+    latest_actual = result.history.sort("ds").tail(1).to_dicts()[0]
+    first_fcst = result.forecast.sort("ds").head(1).to_dicts()[0]
+
+    marimo.md(
+        f"""
+### Forecast Summary
+- Latest observed value: **{latest_actual['y']:.2f}** on **{latest_actual['ds']}**
+- Next forecast value: **{first_fcst['yhat']:.2f}** on **{first_fcst['ds']}**
+- 95% interval: **[{first_fcst['lo95']:.2f}, {first_fcst['hi95']:.2f}]**
+"""
+    )
+  @app.cell
+def _(marimo, result):
+    if not result.ok:
+        return
+
+    forecast_table = (
+        result.forecast
+        .sort("ds")
+        .with_columns([
+            # optional: round numeric columns for readability
+        ])
+        .to_pandas()
+    )
+
+    marimo.vstack([
+        marimo.md("### Forecast Table"),
+        marimo.ui.table(forecast_table),
+    ])
