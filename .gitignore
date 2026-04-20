@@ -213,8 +213,6 @@ Interactive forecasting application built with **Marimo**, **Polars**, **Altair*
 
 - **Public URL:** `https://github.com/sw00111-wvu/wvu-ieng-331-final-7.git`
 
-> Replace the URL above with your actual deployed app URL before submission.
-
 ## What the App Does
 
 This app lets a non-technical user explore Olist historical marketplace behavior and generate forecasts with confidence intervals.
