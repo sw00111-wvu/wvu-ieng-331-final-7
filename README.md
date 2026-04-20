@@ -25,6 +25,7 @@ uv run marimo run app.py
 ```
 
 Then open the local URL printed by Marimo.
+https://molab.marimo.io/notebooks/nb_x4Jwn4cN4ogRnyEGx9FB56
 
 ## Repository Layout
 
