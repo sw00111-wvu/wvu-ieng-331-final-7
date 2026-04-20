@@ -574,3 +574,37 @@ def available_filters(cache_dir: str | Path = "data/cache") -> tuple[list[str], 
     states = sellers.select("seller_state").drop_nulls().unique().sort("seller_state").to_series().to_list()
 
     return ["All", *categories], ["All", *states]
+@app.cell
+def _(marimo, result):
+    if not result.ok:
+        return
+
+    latest_actual = result.history.sort("ds").tail(1).to_dicts()[0]
+    first_fcst = result.forecast.sort("ds").head(1).to_dicts()[0]
+
+    marimo.md(
+        f"""
+### Forecast Summary
+- Latest observed value: **{latest_actual['y']:.2f}** on **{latest_actual['ds']}**
+- Next forecast value: **{first_fcst['yhat']:.2f}** on **{first_fcst['ds']}**
+- 95% interval: **[{first_fcst['lo95']:.2f}, {first_fcst['hi95']:.2f}]**
+"""
+    )
+  @app.cell
+def _(marimo, result):
+    if not result.ok:
+        return
+
+    forecast_table = (
+        result.forecast
+        .sort("ds")
+        .with_columns([
+            # optional: round numeric columns for readability
+        ])
+        .to_pandas()
+    )
+
+    marimo.vstack([
+        marimo.md("### Forecast Table"),
+        marimo.ui.table(forecast_table),
+    ])
